@@ -1,0 +1,13 @@
+# Import cache
+.import/
+
+# Ëxtra files
+*.log
+
+# Addons
+addons/godot-git-plugin
+
+# Binaries
+bin/
+build/
+lib/

@@ -35,7 +35,7 @@ signal profileSaved(profile)
 const SAVE_DIR = "user://saves"
 
 ## Default saves extension file
-const SAVE_EXTENSION = "sav"
+const SAVE_EXTENSION = "save"
 
 ## Current save profile thread
 var _current_save_thread: Thread = null
@@ -44,7 +44,7 @@ var _current_save_thread: Thread = null
 var _current_save_mutex: Mutex = null
 
 ## Current selected profile
-var _current_profile: Dictionary = {}
+var _current_profile = {}
 
 ## Current selected profile name
 var _current_profile_name: String = ""
@@ -150,11 +150,15 @@ func get_all_named_saves() -> Dictionary:
 	# Iterate all saves
 	for item in saves_array:
 		# Clean file name
-		var basename = item.subst(SAVE_DIR.length() + 1).get_basename()
+		var basename = item.substr(SAVE_DIR.length() + 1).get_basename()
 		# Attach value to result
 		saves_result[basename] = item
 	# Return result
 	return saves_result
+
+
+func profile_exists(profile: String) -> bool:
+	return profile in get_all_named_saves()
 
 
 # ----------------------------------------------
@@ -231,6 +235,11 @@ func create_new_save(name: String, base_data: Dictionary = {}):
 	return OK
 
 
+## This method selects an existing profile from the valid profiles. 
+## This method will undergo changes in the future as loading large 
+## files takes too long (> ~ 3mb) and an asynchronous approach will be used instead.
+##
+## returns true if profile was chenged or false if occurs any error
 func select_profile(name: String):
 	# Get all profiles
 	var named_saves = get_all_named_saves()
@@ -239,8 +248,55 @@ func select_profile(name: String):
 	if not (clean_name in named_saves):
 		printerr("Profile %s not exists" % clean_name)
 		return false
-	
-	pass
+	# Get contents
+	var location = named_saves[clean_name]
+	var contents = IOUtils.get_file_contents(location)
+	# Check if occurs any error
+	if contents.has_error:
+		printerr("Error to get file contents: %s" % contents.file_result)
+		return false
+	# Load profile
+	var old_profile = _current_profile_name
+	_current_profile_name = clean_name
+	# Parse content
+	if contents.file_content.empty():
+		_current_profile = {}
+	else:
+		var json_obj = JSON.parse(contents.file_content)
+		if json_obj.error != OK:
+			printerr("Error to parse file data")
+			_current_profile = {}
+		else:
+			_current_profile = json_obj.result
+	# Emit signal events
+	print("Profile %s selected" % clean_name)
+	emit_signal("profileChanged", old_profile, clean_name)
+	return true
+
+
+## Generates a background process to save the current profile information.
+##
+## This method only starts the process and its handling must be done through the signals and
+## the error returned is only to verify if a profile has been selected.
+func save():
+	# Check if any profile was selected
+	if not is_profile_selected():
+		_err_profile_not_selected()
+		return ERR_CANT_RESOLVE
+	# Check mutex nullation
+	if _current_save_mutex == null:
+		_current_save_mutex = Mutex.new()
+	# Check if exists another save process
+	if _current_save_thread == null or not _current_save_thread.is_alive() or _current_save_thread.is_active():
+		_current_save_mutex.lock()
+		_current_save_thread = Thread.new()
+		_current_save_mutex.unlock()
+	# Start save process
+	emit_signal("profileSaveStart")
+	# Start thread process
+	_current_save_thread.start(self, "_on_save_thread_process", _current_profile_name)
+	# Return valid temporal result
+	return OK
 
 
 # ----------------------------------------------
@@ -260,6 +316,10 @@ func _get_internal_property(key: String, emit_error: bool = true):
 	if not is_profile_selected():
 		_err_profile_not_selected()
 		return null
+	# Check if root node is a dictionary
+	if not (_current_profile is Dictionary):
+		printerr("Root node is not a dictionary")
+		return null
 	# Get property path and store current profile
 	var key_path = _get_key_path(key)
 	var copy_profile = _current_profile
@@ -276,6 +336,28 @@ func _get_internal_property(key: String, emit_error: bool = true):
 			return null
 	# Return valid result
 	return copy_profile
+
+
+## Save process in thread execution.
+func _on_save_thread_process(profile: String):
+	_current_save_mutex.lock()
+	# Storage temporal values
+	var saves_named = get_all_named_saves()
+	var location = saves_named[_current_profile_name]
+	# Parse out data
+	var out_data = JSON.print(_current_profile, "\t", true)
+	var write_result = IOUtils.write_file_contents(
+		location, out_data
+	)
+	# Check any error
+	if write_result.has_error:
+		emit_signal("profileSaveFailed", write_result.write_result)
+		_current_save_mutex.unlock()
+		return
+	# Unlock mutex and finish save state
+	emit_signal("profileSaved", profile)
+	_current_save_mutex.unlock()
+	return
 
 
 # ----------------------------------------------
